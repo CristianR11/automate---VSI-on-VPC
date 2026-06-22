@@ -1,0 +1,4 @@
+ibm-vpc>=0.33.0
+ibm-cloud-sdk-core>=3.16.0
+ibm-cos-sdk>=2.13.0
+python-dotenv>=1.0.0

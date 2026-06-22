@@ -1,0 +1,75 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IBM Cloud Credentials
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# State Files
+vsi_state.json
+*.log
+
+# Temporary Files
+*.tmp
+*.bak
+*.backup
+.github_cleanup/
+
+# Configuration with Sensitive Data
+# IMPORTANT: Never commit config.json with real credentials
+config.json
+
+# Docker
+.dockerignore
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+
+# Backup folders
+archive_old_versions/
+backups/
+old/
+
+# Made with Bob

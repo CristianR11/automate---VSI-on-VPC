@@ -1,0 +1,50 @@
+{
+  "vpc": {
+    "id": "r014-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "name": "your-vpc-name"
+  },
+  "vsi_ip": "10.10.10.20",
+  "address_prefix_cidr": "10.10.10.16/28",
+  "subnet_cidr": "10.10.10.16/28",
+  "subnet_name": "compute-subnet",
+  "zones": [
+    {
+      "name": "us-east-1",
+      "priority": 1
+    },
+    {
+      "name": "us-east-2",
+      "priority": 2
+    },
+    {
+      "name": "us-east-3",
+      "priority": 3
+    }
+  ],
+  "vpn_gateway": {
+    "subnet_cidr": "10.10.10.0/28",
+    "subnet_name": "vpn-subnet",
+    "zone": "us-east-1"
+  },
+  "vsi_profile": "gx3-48x240x2l40s",
+  "resource_group_id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "image_id": "",
+  "ssh_key_ids": [
+    "r014-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  ],
+  "security_group_ids": [
+    "r014-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  ],
+  "backup_policy_id": "r014-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "state_file": "vsi_state.json",
+  "max_wait_time_seconds": 600,
+  "check_interval_seconds": 30,
+  "cos": {
+    "enabled": true,
+    "bucket_name": "your-bucket-name",
+    "endpoint": "https://s3.us-east.cloud-object-storage.appdomain.cloud",
+    "state_path": "state/vsi_state.json",
+    "logs_path": "logs/execution",
+    "backup_metadata_path": "state/backup_metadata.json"
+  }
+}
