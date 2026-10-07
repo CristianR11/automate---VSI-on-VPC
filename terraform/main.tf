@@ -50,40 +50,24 @@ resource "ibm_is_instance" "vsi" {
     profile = var.boot_volume_profile
 
     snapshot = var.boot_snapshot_id
-
-    # No eliminar el volumen boot al destruir la instancia.
-    # Los volúmenes son la fuente de los snapshots diarios.
-    delete_volume_on_instance_delete = var.delete_volumes_on_delete
   }
 
   # Interfaz de red primaria con IP fija
   primary_network_interface {
-    name   = "eth0"
-    subnet = ibm_is_subnet.compute.id
+    name            = "eth0"
+    subnet          = ibm_is_subnet.compute.id
+    # Security groups como lista de IDs (sintaxis plana del provider IBM)
+    security_groups = var.security_group_ids
 
     # IP fija 10.10.10.20 — consistente en todas las zonas para
     # que las rutas VPN on-premise no requieran cambios.
     primary_ip {
       address = var.vsi_ip
     }
-
-    # Security groups que controlan el tráfico hacia/desde la instancia
-    dynamic "security_groups" {
-      for_each = var.security_group_ids
-      content {
-        id = security_groups.value
-      }
-    }
   }
 
   # SSH keys autorizadas
   keys = var.ssh_key_ids
-
-  # Volumen de datos desde snapshot
-  # CRÍTICO: incluirlo aquí (no como recurso separado) garantiza provisioning
-  # simultáneo. IBM Cloud no arranca la instancia hasta que ambos volúmenes
-  # estén disponibles.
-  volumes = []  # Se usa volume_attachments para mayor control
 
   depends_on = [ibm_is_subnet.compute]
 }
