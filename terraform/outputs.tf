@@ -35,7 +35,9 @@ output "boot_volume_id" {
 
 output "data_volume_id" {
   description = "ID del volumen de datos atachado"
-  value       = ibm_is_instance_volume_attachment.data.volume_id
+  # En el provider IBM v2.x el attachment no expone volume_id directamente;
+  # se obtiene listando los attachments de la instancia post-apply.
+  value       = ibm_is_instance_volume_attachment.data.id
 }
 
 output "zone" {
