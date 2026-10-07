@@ -1,322 +1,237 @@
-# IBM Cloud VPC GPU Instance Manager with Multi-Zone Failover
+# IBM Cloud VPC GPU Instance Manager — Automatización Start/Stop
 
-Automated management system for GPU-enabled Virtual Server Instances (VSI) in IBM Cloud VPC with intelligent multi-zone failover, snapshot-based recovery, and cost optimization through scheduled start/stop operations.
+Sistema de gestión automatizada de VSI GPU para Grupo Marna (El Tunal) en IBM Cloud VPC con failover multi-zona vía IBM Schematics, validación estricta de snapshots pre-apagado y optimización de costos.
 
 [![IBM Cloud](https://img.shields.io/badge/IBM%20Cloud-VPC-blue)](https://cloud.ibm.com/vpc-ext)
 [![Python](https://img.shields.io/badge/Python-3.11-green)](https://www.python.org/)
+[![Terraform](https://img.shields.io/badge/Terraform-1.5+-purple)](https://www.terraform.io/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-## 🎯 Features
-
-- **🔄 Multi-Zone Failover**: Automatic retry across 3 availability zones (us-east-1, us-east-2, us-east-3)
-- **📸 Snapshot Recovery**: Boot and data volumes restored from daily snapshots
-- **💰 Cost Optimization**: Scheduled start (7 AM) and stop (7 PM) operations
-- **🌐 Fixed IP**: Consistent IP address (10.10.10.20) across zones
-- **🔐 VPN Integration**: Site-to-Site VPN connectivity with dedicated subnet
-- **☁️ State Persistence**: Cloud Object Storage (COS) for state and logs
-- **🤖 Automated Cleanup**: Intelligent resource cleanup on failure
-- **📊 Comprehensive Logging**: Detailed execution logs in COS
-
-## 🏗️ Architecture
+## Arquitectura
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    IBM Cloud VPC (us-east)                   │
-│                                                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │   Zone 1     │  │   Zone 2     │  │   Zone 3     │      │
-│  │  us-east-1   │  │  us-east-2   │  │  us-east-3   │      │
-│  │              │  │              │  │              │      │
-│  │ ┌──────────┐ │  │ ┌──────────┐ │  │ ┌──────────┐ │      │
-│  │ │GPU VSI   │ │  │ │GPU VSI   │ │  │ │GPU VSI   │ │      │
-│  │ │10.10.10  │ │  │ │10.10.10  │ │  │ │10.10.10  │ │      │
-│  │ │  .20     │ │  │ │  .20     │ │  │ │  .20     │ │      │
-│  │ └──────────┘ │  │ └──────────┘ │  │ └──────────┘ │      │
-│  └──────────────┘  └──────────────┘  └──────────────┘      │
-│                                                               │
-│  ┌────────────────────────────────────────────────────────┐ │
-│  │         VPN Gateway (Dedicated Subnet)                  │ │
-│  │              10.10.10.0/28                              │ │
-│  └────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │  Code Engine     │
-                    │  (Cron Jobs)     │
-                    │  - 7:00 AM Start │
-                    │  - 7:00 PM Stop  │
-                    └──────────────────┘
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │  Cloud Object    │
-                    │  Storage (COS)   │
-                    │  - State         │
-                    │  - Logs          │
-                    └──────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                 IBM Cloud Code Engine (us-east)                      │
+│                                                                       │
+│   Cron 7:00 AM ──► Job START ──┐                                     │
+│   Cron 7:00 PM ──► Job STOP   │                                     │
+└───────────────────────────────┼────────────────────────────────────┘
+                                │
+              ┌─────────────────┼─────────────────┐
+              │                 │                   │
+              ▼                 ▼                   ▼
+    ┌──────────────┐  ┌──────────────────┐  ┌────────────────┐
+    │  VPC us-east │  │  IBM Schematics  │  │  Cloud Object  │
+    │              │  │  (failover IaC)  │  │  Storage (COS) │
+    │  GPU VSI     │  │  - workspace z1  │  │  - state/      │
+    │  10.10.10.20 │  │  - workspace z2  │  │  - logs/       │
+    │              │  │  - workspace z3  │  └────────────────┘
+    └──────────────┘  └──────────────────┘
 ```
 
-## 📋 Prerequisites
+### Red
 
-- IBM Cloud account with permissions for:
-  - VPC Infrastructure
-  - Code Engine
-  - Cloud Object Storage
-  - Container Registry
-- IBM Cloud CLI with plugins:
-  - `vpc-infrastructure`
-  - `code-engine`
-  - `container-registry`
-- Docker or Podman installed
-- Python 3.11+ (for local testing)
+| Subnet | CIDR | Zona | Propósito |
+|---|---|---|---|
+| VPN Gateway (PROTEGIDA) | `10.10.10.0/28` | us-east-1 (fija) | VPN Site-to-Site — NUNCA se borra |
+| Compute (dinámica) | `10.10.10.16/28` | cualquier zona | Servidor GPU — se recrea en failover |
 
-## 🚀 Quick Start
+**VSI IP fija**: `10.10.10.20` — consistente en todas las zonas para no romper rutas VPN.
 
-### 1. Clone Repository
-
-```bash
-git clone <repository-url>
-cd <repository-name>
-```
-
-### 2. Configure Environment
-
-```bash
-# Set IBM Cloud API Key
-export IBM_CLOUD_API_KEY="your-api-key"
-
-# Set COS Instance ID (optional but recommended)
-export COS_INSTANCE_ID="your-cos-instance-id"
-
-# Configure snapshots
-./setup_snapshots.sh
-```
-
-### 3. Update Configuration
-
-Edit `config.json` with your VPC details:
-
-```json
-{
-  "vpc": {
-    "id": "your-vpc-id",
-    "name": "your-vpc-name"
-  },
-  "vsi_ip": "10.10.10.20",
-  "vsi_profile": "gx3-48x240x2l40s",
-  "resource_group_id": "your-resource-group-id",
-  "ssh_key_ids": ["your-ssh-key-id"],
-  "security_group_ids": ["your-security-group-id"]
-}
-```
-
-### 4. Deploy
-
-```bash
-# Make scripts executable
-chmod +x deploy_advanced.sh setup_snapshots.sh cleanup_resources.sh
-
-# Deploy to IBM Cloud Code Engine
-./deploy_advanced.sh
-```
-
-## 📁 Project Structure
+### Mejora futura propuesta: Hub + Spoke con Transit Gateway
 
 ```
-.
-├── vsi_advanced_manager_cos.py  # Main VSI management script
-├── cos_storage.py               # Cloud Object Storage client
-├── deploy_advanced.sh           # Deployment script
-├── setup_snapshots.sh           # Snapshot configuration
-├── cleanup_resources.sh         # Resource cleanup utility
-├── config.json                  # Configuration file
-├── Dockerfile                   # Container image
-├── requirements.txt             # Python dependencies
-├── .gitignore                   # Git ignore rules
-├── README.md                    # This file
-└── GUIA_DESPLIEGUE_PASO_A_PASO.md  # Detailed deployment guide (Spanish)
+VPC HUB (vpc-eltunal)          VPC SPOKE (nueva)
+├── Subnet VPN 10.10.10.0/28   └── Subnet Compute 10.10.10.16/28
+│   └── VPN Gateway                  └── GPU VSI 10.10.10.20
+└── Transit Gateway attachment ─────► Transit Gateway ◄─── attachment
 ```
 
-## 🔧 Configuration
-
-### Network Configuration
-
-The system uses two separate networks:
-
-1. **VPN Gateway Subnet** (Protected)
-   - CIDR: `10.10.10.0/28`
-   - Zone: `us-east-1` (fixed)
-   - **Never deleted**
-
-2. **Compute Subnet** (Dynamic)
-   - CIDR: `10.10.10.16/28`
-   - Zone: Any available (us-east-1, us-east-2, us-east-3)
-   - VSI IP: `10.10.10.20` (fixed)
-   - Created/deleted based on availability
-
-### Snapshot Configuration
-
-Configure snapshot IDs using the interactive script:
-
-```bash
-./setup_snapshots.sh
-```
-
-This will:
-1. List available snapshots
-2. Prompt for boot and data volume snapshot IDs
-3. Update Code Engine secrets
-
-## 🔄 Failover Logic
-
-When a VSI fails to start in a zone:
-
-1. **Detect Failure**: Monitor instance status for up to 10 minutes
-2. **Wait Period**: 30 seconds before cleanup
-3. **Delete Instance**: Remove failed instance (30s wait)
-4. **Delete Subnet**: Remove subnet (2s wait)
-5. **Delete Address Prefix**: Remove address prefix (1s wait)
-6. **Retry Next Zone**: Attempt creation in next available zone
-
-Total cleanup time per failed zone: ~63 seconds
-
-## 📊 Monitoring
-
-### View Job Runs
-
-```bash
-# List all job runs
-ibmcloud ce jobrun list
-
-# View logs
-ibmcloud ce jobrun logs --name <jobrun-name>
-
-# Follow logs in real-time
-ibmcloud ce jobrun logs --follow --job tunal-smart-start
-```
-
-### Check VSI Status
-
-```bash
-# List instances
-ibmcloud is instances
-
-# Get instance details
-ibmcloud is instance <instance-id>
-
-# Check network interfaces
-ibmcloud is instance-network-interfaces <instance-id>
-```
-
-### COS State
-
-```bash
-# View saved state
-ibmcloud cos object-get \
-  --bucket tunal-automation \
-  --key state/vsi_state.json \
-  --region us-east
-
-# List execution logs
-ibmcloud cos objects \
-  --bucket tunal-automation \
-  --prefix logs/execution/ \
-  --region us-east
-```
-
-## 🛠️ Maintenance
-
-### Update Snapshots
-
-When new snapshots are available:
-
-```bash
-./setup_snapshots.sh
-```
-
-### Clean Up Resources
-
-To manually clean up compute resources (protects VPN subnet):
-
-```bash
-./cleanup_resources.sh
-```
-
-### Redeploy
-
-After code changes:
-
-```bash
-./deploy_advanced.sh
-```
-
-## 🐛 Troubleshooting
-
-### VSI Fails to Start
-
-1. Check logs: `ibmcloud ce jobrun logs --job tunal-smart-start --tail 200`
-2. Verify snapshots exist: `ibmcloud is snapshots`
-3. Check zone capacity: `ibmcloud is instance-profiles gx3-48x240x2l40s`
-
-### Network Issues
-
-1. Verify address prefixes: `ibmcloud is vpc-address-prefixes <vpc-id>`
-2. Check subnets: `ibmcloud is subnets`
-3. Verify VPN: `ibmcloud is vpn-gateways`
-
-### COS Issues
-
-1. Verify bucket: `ibmcloud cos buckets --region us-east`
-2. Check contents: `ibmcloud cos objects --bucket tunal-automation --region us-east`
-
-## 💰 Cost Optimization
-
-- **Estimated Savings**: ~50% vs 24/7 operation
-- **Active Hours**: 12 hours/day (7 AM - 7 PM)
-- **Snapshots**: Incremental backups (low cost)
-- **Code Engine**: Pay-per-use (cron jobs)
-
-## 🔐 Security
-
-- **Secrets**: Stored in Code Engine secrets
-- **API Keys**: Never in source code
-- **COS**: Private bucket with restricted access
-- **VPN**: Site-to-Site for secure connectivity
-- **Network**: Isolated subnets with security groups
-
-## 📝 Important Notes
-
-1. **VPN Subnet**: The subnet `10.10.10.0/28` is for VPN Gateway and must **NEVER** be deleted
-2. **Fixed IP**: VSI always gets IP `10.10.10.20` regardless of zone
-3. **Cleanup Order**: Always delete in order: Instance → Subnet → Address Prefix
-4. **Resource Group**: All resources created in specified resource group
-5. **Snapshots**: Must be updated manually when IDs change
-
-## 📄 License
-
-Apache License 2.0 - See [LICENSE](LICENSE) file for details
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📞 Support
-
-For issues or questions:
-1. Check logs in Code Engine
-2. Verify state in COS
-3. Consult IBM Cloud VPC documentation
-4. Open an issue in this repository
-
-## 🙏 Acknowledgments
-
-- IBM Cloud VPC team for the infrastructure
-- IBM Cloud Code Engine for serverless execution
-- IBM Cloud Object Storage for state persistence
+Al separar las VPCs, las rutas se propagan automáticamente por TGW y el failover de zona no requiere actualizar rutas VPN on-premise.
 
 ---
 
-**Version**: 2.0  
-**Last Updated**: June 2026  
-**Status**: Production Ready ✅
+## Flujos de operación
+
+### Job START (7:00 AM, lunes a viernes)
+
+1. **Cargar estado** desde COS (`state/vsi_state.json`)
+2. **Si hay instancia registrada:**
+   - Consultar estado en VPC API
+   - Si `stopped` → enviar START → esperar `running` (max 20 min)
+   - Si `running` → validar data volume attached → registrar éxito
+   - Si `failed` / timeout → obtener snapshots frescos → limpiar zona → **failover**
+3. **Failover (IBM Schematics):**
+   - Verificar que snapshots boot y data estén en estado `stable`
+   - Para cada zona disponible (excluyendo la que falló):
+     - Ejecutar `terraform apply` en el workspace Schematics de la zona
+     - Esperar `running` en VPC API (max 20 min)
+     - Si falla → `terraform destroy` + siguiente zona
+4. **Post-start:** guardar estado en COS con `instance_id`, `zone`, `boot_volume_id`, `data_volume_id`
+
+### Job STOP (7:00 PM, lunes a viernes)
+
+1. **Validar instancia** en VPC API (usando `INSTANCE_ID` del Secret)
+2. **Validar volúmenes** — verificar que boot y data coincidan con `BOOT_VOLUME_ID` / `DATA_VOLUME_ID`
+3. **Validar snapshots (BLOQUEO DURO):**
+   - El snapshot más reciente de cada volumen debe ser del **mismo día** (zona America/Bogota)
+   - El snapshot debe estar en estado `stable`
+   - Si está `pending` → esperar hasta 15 min (3 reintentos de 5 min)
+   - Si tiene más de 60 min de antigüedad → **advertencia** (no bloquea)
+   - Usa `--force` para omitir esta validación en emergencias
+4. **Ejecutar stop** → esperar `stopped` (max 5 min)
+5. **Persistir estado** en COS
+
+---
+
+## Estructura del proyecto
+
+```
+.
+├── vsi_advanced_manager_cos.py    # Orquestador principal (start / stop / status)
+├── cos_storage.py                  # Cliente IBM Cloud Object Storage
+├── schematics_client.py            # Cliente IBM Schematics (orquesta Terraform por zona)
+├── terraform/
+│   ├── main.tf                     # Recursos: address_prefix, subnet, instance, data_volume
+│   ├── variables.tf                # Variables de la plantilla (zona, snapshots, VPC, etc.)
+│   ├── outputs.tf                  # Outputs: instance_id, subnet_id, volume_ids
+│   └── versions.tf                 # Provider IBM, versión Terraform requerida
+├── deploy_advanced.sh              # Script de despliegue a Code Engine
+├── setup_snapshots.sh              # Script interactivo para actualizar snapshot IDs
+├── cleanup_resources.sh            # Limpieza manual de recursos compute
+├── config.json                     # Configuración del entorno
+├── Dockerfile                      # Imagen del contenedor
+├── requirements.txt                # Dependencias Python
+└── GUIA_DESPLIEGUE_PASO_A_PASO.md # Guía de despliegue
+```
+
+---
+
+## Configuración
+
+### Prerequisitos
+
+- IBM Cloud CLI con plugins: `vpc-infrastructure`, `code-engine`, `container-registry`
+- Docker o Podman
+- Python 3.11+
+- 3 workspaces de IBM Schematics creados (uno por zona), apuntando al directorio `terraform/`
+
+### 1. Variables de entorno necesarias
+
+```bash
+export IBM_CLOUD_API_KEY="tu-api-key"
+export COS_INSTANCE_ID="tu-cos-instance-id"          # opcional pero recomendado
+export BOOT_VOLUME_SNAPSHOT_ID="r014-xxxx"            # snapshot boot para recreación
+export DATA_VOLUME_SNAPSHOT_ID="r014-xxxx"            # snapshot data para recreación
+
+# IDs de recursos activos (para el job STOP — actualizar la primera vez)
+export INSTANCE_ID="0767_xxxx"
+export BOOT_VOLUME_ID="r014-xxxx"
+export DATA_VOLUME_ID="r014-xxxx"
+export BACKUP_POLICY_ID="r014-dab7a8b6-4343-4f22-873c-1111d88099d8"
+```
+
+### 2. config.json — campos clave
+
+```json
+{
+  "schematics": {
+    "workspace_ids": {
+      "us-east-1": "ID_WORKSPACE_ZONA_1",
+      "us-east-2": "ID_WORKSPACE_ZONA_2",
+      "us-east-3": "ID_WORKSPACE_ZONA_3"
+    }
+  },
+  "snapshot_max_age_minutes": 60,
+  "max_start_wait_minutes": 20
+}
+```
+
+### 3. Crear workspaces Schematics
+
+```bash
+# Crear un workspace por zona apuntando al directorio terraform/
+# desde la consola de IBM Cloud → Schematics → Workspaces → Create
+# o vía CLI:
+ibmcloud schematics workspace new \
+  --name tunal-zone-us-east-1 \
+  --location us-east \
+  --template-type terraform_v1.5
+```
+
+Actualizar los IDs en `config.json` → sección `schematics.workspace_ids`.
+
+### 4. Desplegar
+
+```bash
+chmod +x deploy_advanced.sh
+./deploy_advanced.sh
+```
+
+---
+
+## Monitoreo
+
+```bash
+# Ver últimas ejecuciones
+ibmcloud ce jobrun list --job tunal-smart-start
+ibmcloud ce jobrun list --job tunal-stop
+
+# Ver logs de una ejecución
+ibmcloud ce jobrun logs --name <jobrun-name>
+
+# Ejecutar manualmente
+ibmcloud ce jobrun submit --job tunal-smart-start --name manual-start
+ibmcloud ce jobrun submit --job tunal-stop --name manual-stop
+ibmcloud ce jobrun submit --job tunal-status --name check-status
+
+# Forzar apagado sin validar snapshots (emergencia)
+ibmcloud ce jobrun submit --job tunal-stop --name emergency-stop \
+  --env OVERRIDE_CMD="python vsi_advanced_manager_cos.py stop --force"
+```
+
+---
+
+## Comportamiento ante fallos
+
+| Evento | Respuesta del sistema |
+|---|---|
+| Instancia no arranca en zona X | Limpia zona X → crea en siguiente zona via Schematics |
+| Falta capacidad GPU en zona | Schematics destroy → siguiente zona |
+| Snapshot no existe hoy | Job STOP se bloquea — no apaga el servidor |
+| Snapshot en estado `pending` | Espera hasta 15 min — si sigue pending, bloquea |
+| Snapshot en estado `failed` | Bloqueo duro — requiere `--force` |
+| COS no disponible | Fallback a `vsi_state.json` local |
+| Todas las zonas fallan | Alerta crítica — NO reintentar automáticamente |
+| Data volume no atachado al boot | Advertencia en log — el servidor arranca igual |
+
+---
+
+## Seguridad
+
+- API Keys en Code Engine Secrets (nunca en código fuente ni `config.json`)
+- `config.json` está en `.gitignore`
+- Bucket COS privado con acceso restringido
+- VPN Site-to-Site para conectividad on-premise
+
+---
+
+## Costos estimados
+
+- **Ahorro**: ~50% vs operación 24/7
+- **Horas activas**: 12 h/día × 5 días (7 AM – 7 PM, L–V)
+- **Code Engine**: pay-per-use (segundos de ejecución)
+- **Schematics**: gratuito (cobro solo por recursos creados)
+
+---
+
+## Versiones
+
+- **v2.0** (Junio 2026): Integración Schematics, validación de snapshots estricta, variables explícitas en jobs
+- **v1.0** (Junio 2026): Versión inicial con failover por Python SDK
+
+**Estado**: Production Ready ✅
+
+---
+
+**Licencia**: Apache License 2.0 — ver [LICENSE](LICENSE)

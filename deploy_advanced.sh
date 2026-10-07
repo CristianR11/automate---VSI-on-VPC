@@ -41,9 +41,26 @@ if [ ! -f "vsi_advanced_manager_cos.py" ]; then
 fi
 
 # Variables de configuración
-PROJECT_NAME="tunal-automation"
-NAMESPACE="tunal-automation"
+# Usar variable de entorno si está definida, sino usar valor por defecto
+PROJECT_NAME="${CE_PROJECT_NAME:-tunal-automation}"
+NAMESPACE="${CE_PROJECT_NAME:-tunal-automation}"
 IMAGE_NAME="vsi-manager"
+
+# Nombres de recursos de Code Engine (usar variables de entorno si están definidas)
+SECRET_NAME="${CE_SECRET_NAME:-tunal-credentials}"
+CONFIGMAP_NAME="${CE_CONFIGMAP_NAME:-tunal-config}"
+JOB_START_NAME="${CE_JOB_START_NAME:-tunal-smart-start}"
+JOB_STOP_NAME="${CE_JOB_STOP_NAME:-tunal-stop}"
+JOB_STATUS_NAME="${CE_JOB_STATUS_NAME:-tunal-status}"
+CRON_START_NAME="${CE_CRON_START_NAME:-tunal-start-schedule}"
+CRON_STOP_NAME="${CE_CRON_STOP_NAME:-tunal-stop-schedule}"
+
+# Variables de recursos activos (actualizadas por el job START al finalizar)
+# Se configuran manualmente la primera vez y el job las mantiene actualizadas
+INSTANCE_ID="${INSTANCE_ID:-}"
+BOOT_VOLUME_ID="${BOOT_VOLUME_ID:-}"
+DATA_VOLUME_ID="${DATA_VOLUME_ID:-}"
+
 # Container Registry: región para 'ibmcloud cr region-set' vs hostname
 # Para Dallas: región="us-south", hostname="us.icr.io"
 CR_REGION="${IBM_CR_REGION:-us-south}"
@@ -168,41 +185,70 @@ fi
 print_info "Iniciando sesión en Container Registry..."
 ibmcloud cr login
 
-# Paso 6.5: Verificar/Crear bucket de COS (si COS está habilitado)
+# Paso 6.5: Detectar y configurar Cloud Object Storage
+print_header "Configurando Cloud Object Storage"
+
+# Obtener bucket name de config.json
+BUCKET_NAME=$(jq -r '.cos.bucket_name // "tunal-automation"' config.json)
+COS_REGION="us-east"
+
+print_info "Bucket configurado en config.json: $BUCKET_NAME"
+
+# Detectar instancia COS automáticamente si no está configurada
+if [ -z "$COS_INSTANCE_ID" ]; then
+    print_info "Detectando instancia de Cloud Object Storage..."
+    
+    # Buscar instancia COS en la cuenta
+    COS_INSTANCE_ID=$(ibmcloud resource service-instances --service-name cloud-object-storage --output json 2>/dev/null | \
+        jq -r '.[0].guid // empty' 2>/dev/null)
+    
+    if [ -n "$COS_INSTANCE_ID" ]; then
+        COS_INSTANCE_NAME=$(ibmcloud resource service-instances --service-name cloud-object-storage --output json 2>/dev/null | \
+            jq -r '.[0].name // "N/A"' 2>/dev/null)
+        print_success "Instancia COS detectada: $COS_INSTANCE_NAME"
+        print_info "Instance ID: $COS_INSTANCE_ID"
+        
+        # Configurar COS CLI con el CRN
+        COS_CRN=$(ibmcloud resource service-instances --service-name cloud-object-storage --output json 2>/dev/null | \
+            jq -r '.[0].crn // empty' 2>/dev/null)
+        
+        if [ -n "$COS_CRN" ]; then
+            print_info "Configurando COS CLI..."
+            ibmcloud cos config crn --crn "$COS_CRN" --force 2>/dev/null || true
+        fi
+    else
+        print_warning "No se detectó instancia COS automáticamente"
+        print_info "Puedes configurarla manualmente con: export COS_INSTANCE_ID=<tu-instance-id>"
+    fi
+fi
+
+# Verificar/Crear bucket si tenemos instance ID
 if [ -n "$COS_INSTANCE_ID" ]; then
-    print_header "Configurando Cloud Object Storage"
-    
-    BUCKET_NAME="tunal-automation"
-    COS_REGION="us-east"
-    
     print_info "Verificando bucket COS: $BUCKET_NAME"
     
-    # Verificar si el bucket existe
-    if ibmcloud cos bucket-head --bucket "$BUCKET_NAME" --region "$COS_REGION" &> /dev/null; then
+    # Verificar si el bucket existe (con timeout)
+    if timeout 5 ibmcloud cos bucket-head --bucket "$BUCKET_NAME" --region "$COS_REGION" &> /dev/null; then
         print_success "Bucket COS existe: $BUCKET_NAME"
     else
-        print_warning "Bucket no existe. Creando..."
+        print_warning "No se pudo verificar bucket (puede no existir o timeout)"
+        print_info "Intentando crear bucket..."
         
-        # Crear bucket con clase de almacenamiento Smart Tier
-        ibmcloud cos bucket-create \
+        # Intentar crear bucket con clase de almacenamiento Smart Tier
+        if timeout 10 ibmcloud cos bucket-create \
             --bucket "$BUCKET_NAME" \
             --ibm-service-instance-id "$COS_INSTANCE_ID" \
             --region "$COS_REGION" \
-            --class Smart
-        
-        if [ $? -eq 0 ]; then
+            --class Smart 2>/dev/null; then
             print_success "Bucket creado: $BUCKET_NAME"
-            
-            # Crear estructura de directorios (opcional, se crean automáticamente al subir archivos)
-            print_info "Bucket listo para almacenar estado y logs"
         else
-            print_error "Error al crear bucket COS"
-            print_warning "El sistema funcionará sin persistencia de estado"
+            print_warning "No se pudo crear bucket (puede ya existir)"
+            print_info "El sistema intentará usar el bucket configurado"
         fi
     fi
 else
-    print_warning "COS_INSTANCE_ID no configurado, omitiendo configuración de COS"
-    print_info "El sistema funcionará sin persistencia de estado"
+    print_warning "COS_INSTANCE_ID no disponible"
+    print_info "El sistema funcionará sin persistencia de estado en COS"
+    print_info "Para habilitar COS, configura: export COS_INSTANCE_ID=<tu-instance-id>"
 fi
 print_success "Sesión iniciada en Container Registry"
 
@@ -256,33 +302,34 @@ if [ -z "$COS_INSTANCE_ID" ]; then
 fi
 
 print_info "Creando/actualizando secreto de credenciales..."
-if ibmcloud ce secret get --name tunal-credentials &> /dev/null; then
-    if [ -n "$COS_INSTANCE_ID" ]; then
-        ibmcloud ce secret update --name tunal-credentials \
-            --from-literal IBM_CLOUD_API_KEY="$IBM_CLOUD_API_KEY" \
-            --from-literal IBM_CLOUD_REGION="$CE_REGION" \
-            --from-literal COS_INSTANCE_ID="$COS_INSTANCE_ID" \
-            --from-literal COS_ENDPOINT="https://s3.$CE_REGION.cloud-object-storage.appdomain.cloud" \
-            --from-literal COS_BUCKET_NAME="tunal-automation"
-    else
-        ibmcloud ce secret update --name tunal-credentials \
-            --from-literal IBM_CLOUD_API_KEY="$IBM_CLOUD_API_KEY" \
-            --from-literal IBM_CLOUD_REGION="$CE_REGION"
-    fi
+
+# Construir los literales comunes del secret
+SECRET_LITERALS=(
+    --from-literal IBM_CLOUD_API_KEY="$IBM_CLOUD_API_KEY"
+    --from-literal IBM_CLOUD_REGION="$CE_REGION"
+    --from-literal BOOT_VOLUME_SNAPSHOT_ID="${BOOT_VOLUME_SNAPSHOT_ID:-}"
+    --from-literal DATA_VOLUME_SNAPSHOT_ID="${DATA_VOLUME_SNAPSHOT_ID:-}"
+    # IDs de recursos activos (job START los actualiza tras cada ejecución exitosa)
+    --from-literal INSTANCE_ID="$INSTANCE_ID"
+    --from-literal BOOT_VOLUME_ID="$BOOT_VOLUME_ID"
+    --from-literal DATA_VOLUME_ID="$DATA_VOLUME_ID"
+    --from-literal BACKUP_POLICY_ID="${BACKUP_POLICY_ID:-r014-dab7a8b6-4343-4f22-873c-1111d88099d8}"
+)
+
+if [ -n "$COS_INSTANCE_ID" ]; then
+    SECRET_LITERALS+=(
+        --from-literal COS_API_KEY="${COS_API_KEY:-}"
+        --from-literal COS_INSTANCE_ID="$COS_INSTANCE_ID"
+        --from-literal COS_ENDPOINT="https://s3.$CE_REGION.cloud-object-storage.appdomain.cloud"
+        --from-literal COS_BUCKET_NAME="${COS_BUCKET_NAME:-tunal-automation}"
+    )
+fi
+
+if ibmcloud ce secret get --name $SECRET_NAME &> /dev/null; then
+    ibmcloud ce secret update --name $SECRET_NAME "${SECRET_LITERALS[@]}"
     print_success "Secreto actualizado"
 else
-    if [ -n "$COS_INSTANCE_ID" ]; then
-        ibmcloud ce secret create --name tunal-credentials \
-            --from-literal IBM_CLOUD_API_KEY="$IBM_CLOUD_API_KEY" \
-            --from-literal IBM_CLOUD_REGION="$CE_REGION" \
-            --from-literal COS_INSTANCE_ID="$COS_INSTANCE_ID" \
-            --from-literal COS_ENDPOINT="https://s3.$CE_REGION.cloud-object-storage.appdomain.cloud" \
-            --from-literal COS_BUCKET_NAME="tunal-automation"
-    else
-        ibmcloud ce secret create --name tunal-credentials \
-            --from-literal IBM_CLOUD_API_KEY="$IBM_CLOUD_API_KEY" \
-            --from-literal IBM_CLOUD_REGION="$CE_REGION"
-    fi
+    ibmcloud ce secret create --name $SECRET_NAME "${SECRET_LITERALS[@]}"
     print_success "Secreto creado"
 fi
 
@@ -300,12 +347,12 @@ fi
 
 # Paso 11: Crear/Actualizar configmap
 print_info "Creando/actualizando configmap con config.json..."
-if ibmcloud ce configmap get --name tunal-config &> /dev/null; then
-    ibmcloud ce configmap update --name tunal-config \
+if ibmcloud ce configmap get --name $CONFIGMAP_NAME &> /dev/null; then
+    ibmcloud ce configmap update --name $CONFIGMAP_NAME \
         --from-file config.json
     print_success "ConfigMap actualizado"
 else
-    ibmcloud ce configmap create --name tunal-config \
+    ibmcloud ce configmap create --name $CONFIGMAP_NAME \
         --from-file config.json
     print_success "ConfigMap creado"
 fi
@@ -314,61 +361,67 @@ fi
 print_header "Configurando Jobs"
 
 # Job Smart Start
-print_info "Configurando job: tunal-smart-start..."
-if ibmcloud ce job get --name tunal-smart-start &> /dev/null; then
-    ibmcloud ce job update --name tunal-smart-start \
-        --image "$IMAGE_TAG"
-    print_success "Job tunal-smart-start actualizado"
+# maxexecutiontime=1800 (30 min) para cubrir: verificar estado + esperar Schematics apply
+# en hasta 3 zonas + esperar boot GPU (20 min por zona)
+print_info "Configurando job: $JOB_START_NAME..."
+if ibmcloud ce job get --name $JOB_START_NAME &> /dev/null; then
+    ibmcloud ce job update --name $JOB_START_NAME \
+        --image "$IMAGE_TAG" \
+        --maxexecutiontime 1800
+    print_success "Job $JOB_START_NAME actualizado"
 else
-    ibmcloud ce job create --name tunal-smart-start \
+    ibmcloud ce job create --name $JOB_START_NAME \
         --image "$IMAGE_TAG" \
         --registry-secret registry-access \
-        --env-from-secret tunal-credentials \
-        --env-from-configmap tunal-config \
+        --env-from-secret $SECRET_NAME \
+        --env-from-configmap $CONFIGMAP_NAME \
         --cpu 0.5 \
         --memory 1G \
-        --maxexecutiontime 900 \
-        --retrylimit 1 \
+        --maxexecutiontime 1800 \
+        --retrylimit 0 \
         --cmd python \
         --arg vsi_advanced_manager_cos.py \
         --arg start
-    print_success "Job tunal-smart-start creado"
+    print_success "Job $JOB_START_NAME creado"
 fi
 
 # Job Stop
-print_info "Configurando job: tunal-stop..."
-if ibmcloud ce job get --name tunal-stop &> /dev/null; then
-    ibmcloud ce job update --name tunal-stop \
-        --image "$IMAGE_TAG"
-    print_success "Job tunal-stop actualizado"
+# maxexecutiontime=2700 (45 min) para cubrir: validar estado + esperar snapshots pending
+# (hasta 3 reintentos de 5 min = 15 min) + ejecutar stop
+print_info "Configurando job: $JOB_STOP_NAME..."
+if ibmcloud ce job get --name $JOB_STOP_NAME &> /dev/null; then
+    ibmcloud ce job update --name $JOB_STOP_NAME \
+        --image "$IMAGE_TAG" \
+        --maxexecutiontime 2700
+    print_success "Job $JOB_STOP_NAME actualizado"
 else
-    ibmcloud ce job create --name tunal-stop \
+    ibmcloud ce job create --name $JOB_STOP_NAME \
         --image "$IMAGE_TAG" \
         --registry-secret registry-access \
-        --env-from-secret tunal-credentials \
-        --env-from-configmap tunal-config \
+        --env-from-secret $SECRET_NAME \
+        --env-from-configmap $CONFIGMAP_NAME \
         --cpu 0.25 \
         --memory 0.5G \
-        --maxexecutiontime 300 \
-        --retrylimit 2 \
+        --maxexecutiontime 2700 \
+        --retrylimit 0 \
         --cmd python \
         --arg vsi_advanced_manager_cos.py \
         --arg stop
-    print_success "Job tunal-stop creado"
+    print_success "Job $JOB_STOP_NAME creado"
 fi
 
-# Job Status (para verificación)
-print_info "Configurando job: tunal-status..."
-if ibmcloud ce job get --name tunal-status &> /dev/null; then
-    ibmcloud ce job update --name tunal-status \
+# Job Status (consulta sin modificar estado)
+print_info "Configurando job: $JOB_STATUS_NAME..."
+if ibmcloud ce job get --name $JOB_STATUS_NAME &> /dev/null; then
+    ibmcloud ce job update --name $JOB_STATUS_NAME \
         --image "$IMAGE_TAG"
-    print_success "Job tunal-status actualizado"
+    print_success "Job $JOB_STATUS_NAME actualizado"
 else
-    ibmcloud ce job create --name tunal-status \
+    ibmcloud ce job create --name $JOB_STATUS_NAME \
         --image "$IMAGE_TAG" \
         --registry-secret registry-access \
-        --env-from-secret tunal-credentials \
-        --env-from-configmap tunal-config \
+        --env-from-secret $SECRET_NAME \
+        --env-from-configmap $CONFIGMAP_NAME \
         --cpu 0.25 \
         --memory 0.5G \
         --maxexecutiontime 300 \
@@ -376,7 +429,7 @@ else
         --cmd python \
         --arg vsi_advanced_manager_cos.py \
         --arg status
-    print_success "Job tunal-status creado"
+    print_success "Job $JOB_STATUS_NAME creado"
 fi
 
 # Paso 13: Configurar Cron Subscriptions
@@ -384,12 +437,12 @@ print_header "Configurando Programación (Cron)"
 
 # Cron Start - 7:00 AM Lunes a Viernes
 print_info "Configurando programación de encendido (7:00 AM L-V)..."
-if ibmcloud ce subscription cron get --name tunal-start-schedule &> /dev/null; then
+if ibmcloud ce subscription cron get --name $CRON_START_NAME &> /dev/null; then
     print_warning "Subscription de start ya existe, omitiendo..."
 else
-    ibmcloud ce subscription cron create --name tunal-start-schedule \
+    ibmcloud ce subscription cron create --name $CRON_START_NAME \
         --destination-type job \
-        --destination tunal-smart-start \
+        --destination $JOB_START_NAME \
         --schedule "0 7 * * 1-5" \
         --time-zone "America/Bogota" \
         --data '{"action":"start"}'
@@ -398,12 +451,12 @@ fi
 
 # Cron Stop - 7:00 PM Lunes a Viernes
 print_info "Configurando programación de apagado (7:00 PM L-V)..."
-if ibmcloud ce subscription cron get --name tunal-stop-schedule &> /dev/null; then
+if ibmcloud ce subscription cron get --name $JOB_STOP_NAME-schedule &> /dev/null; then
     print_warning "Subscription de stop ya existe, omitiendo..."
 else
-    ibmcloud ce subscription cron create --name tunal-stop-schedule \
+    ibmcloud ce subscription cron create --name $JOB_STOP_NAME-schedule \
         --destination-type job \
-        --destination tunal-stop \
+        --destination $JOB_STOP_NAME \
         --schedule "0 19 * * 1-5" \
         --time-zone "America/Bogota" \
         --data '{"action":"stop"}'
@@ -418,7 +471,7 @@ read -r response
 if [[ "$response" =~ ^[Ss]$ ]]; then
     print_info "Ejecutando job de status..."
     JOBRUN_NAME="test-status-$(date +%s)"
-    ibmcloud ce jobrun submit --job tunal-status --name "$JOBRUN_NAME"
+    ibmcloud ce jobrun submit --job $JOB_STATUS_NAME --name "$JOBRUN_NAME"
     
     print_info "Esperando resultado..."
     sleep 10
@@ -435,9 +488,9 @@ echo ""
 print_info "Recursos creados:"
 echo "  • Proyecto Code Engine: $PROJECT_NAME"
 echo "  • Imagen Docker: $IMAGE_TAG"
-echo "  • Job Smart Start: tunal-smart-start"
-echo "  • Job Stop: tunal-stop"
-echo "  • Job Status: tunal-status"
+echo "  • Job Smart Start: $JOB_START_NAME"
+echo "  • Job Stop: $JOB_STOP_NAME"
+echo "  • Job Status: $JOB_STATUS_NAME"
 echo "  • Programación Start: 7:00 AM (L-V)"
 echo "  • Programación Stop: 7:00 PM (L-V)"
 echo ""
@@ -445,7 +498,7 @@ print_info "Comandos útiles:"
 echo "  • Ver jobs: ibmcloud ce job list"
 echo "  • Ver ejecuciones: ibmcloud ce jobrun list"
 echo "  • Ver logs: ibmcloud ce jobrun logs --name <jobrun-name>"
-echo "  • Ejecutar manualmente: ibmcloud ce jobrun submit --job tunal-smart-start"
+echo "  • Ejecutar manualmente: ibmcloud ce jobrun submit --job $JOB_START_NAME"
 echo "  • Ver programación: ibmcloud ce subscription cron list"
 echo ""
 print_success "¡Todo listo! El sistema comenzará a operar según la programación configurada."
